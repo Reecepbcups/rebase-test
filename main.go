@@ -130,22 +130,27 @@ func (ow *OndoWrappedStock) Wrap(st *StockToken, from string, amount *big.Int) {
 }
 
 // Unwrap converts owTSLA tokens back to TSLA tokens
-func (ow *OndoWrappedStock) Unwrap(st *StockToken, from string, owAmount *big.Int) {
-	if ow.balances[from].Cmp(owAmount) < 0 {
-		panic("Insufficient owTSLA balance")
+func (ow *OndoWrappedStock) Unwrap(st *StockToken, to string, owAmount *big.Int) {
+	// Check the balance of the contract
+	contractAddr := "0xCONTRACT"
+	if ow.balances[contractAddr] == nil || ow.balances[contractAddr].Cmp(owAmount) < 0 {
+		panic(fmt.Sprintf("Insufficient owTSLA balance for %s", contractAddr))
 	}
 
 	// Calculate TSLA amount based on current exchange rate
 	tslaAmount := new(big.Int).Mul(owAmount, ow.exchangeRate)
 	tslaAmount.Div(tslaAmount, big.NewInt(basePrecision))
 
-	// Burn owTSLA from user
-	ow.balances[from].Sub(ow.balances[from], owAmount)
+	// Burn owTSLA from contract
+	ow.balances[contractAddr].Sub(ow.balances[contractAddr], owAmount)
 	ow.totalSupply.Sub(ow.totalSupply, owAmount)
 
-	// Transfer TSLA from wrapper contract to user
+	// Transfer TSLA from wrapper contract to recipient
 	st.balances[ow.ticker].Sub(st.balances[ow.ticker], tslaAmount)
-	st.balances[from].Add(st.balances[from], tslaAmount)
+	if st.balances[to] == nil {
+		st.balances[to] = big.NewInt(0)
+	}
+	st.balances[to].Add(st.balances[to], tslaAmount)
 }
 
 // UpdateExchangeRate recalculates the exchange rate after rebases
@@ -202,6 +207,33 @@ func (t *StockToken) Interact(from, to string, amount *big.Int, ows *OndoWrapped
 	t.balances[to].Add(t.balances[to], amount)
 }
 
+// Claim unwraps and transfers tokens from contract to user
+func (ow *OndoWrappedStock) Claim(st *StockToken, from, to string, wrappedAmount *big.Int) {
+	if !strings.HasPrefix(from, "0xCONTRACT") {
+		panic("Can only claim from contract addresses")
+	}
+
+	fmt.Printf("Claiming %s wrapped tokens...\n", formatTokens(wrappedAmount))
+
+	// Check contract's wrapped token balance
+	if ow.balances[from] == nil || ow.balances[from].Cmp(wrappedAmount) < 0 {
+		fmt.Printf("Attempting to claim more than available. Max available: %s\n",
+			formatTokens(ow.balances[from]))
+		wrappedAmount = new(big.Int).Set(ow.balances[from])
+	}
+
+	// Calculate underlying amount based on exchange rate
+	underlyingAmount := new(big.Int).Mul(wrappedAmount, ow.exchangeRate)
+	underlyingAmount.Div(underlyingAmount, big.NewInt(basePrecision))
+
+	fmt.Printf("This will receive %s underlying tokens at current exchange rate of %s\n",
+		formatTokens(underlyingAmount),
+		formatTokens(ow.exchangeRate))
+
+	// Unwrap tokens directly to recipient
+	ow.Unwrap(st, to, wrappedAmount)
+}
+
 func main() {
 	// Initialize tokens with ticker
 	stockToken := NewStockToken("TSLA")
@@ -240,14 +272,17 @@ func main() {
 	stockToken.Rebase(dividend)
 	owStock.UpdateExchangeRate(stockToken)
 
-	// // pull out 1 share of owTSLA from the contract bu Interacting from the CONTRACT and sending TO the user
-	// fmt.Println("Pulling out 1 share of owTSLA from the contract...")
-	// stockToken.Interact(contract, reece, big.NewInt(1), owStock)
-	// display(stockToken, owStock, reece, contract)
-
 	fmt.Printf("\nAfter dividend:\n")
 	display(stockToken, owStock, reece, contract)
 
+	// Claim wrapped tokens from contract
+	fmt.Println("\nClaiming tokens from contract...")
+	claimAmount := new(big.Int).Mul(big.NewInt(1), big.NewInt(basePrecision)) // Claim 1 wrapped token
+	owStock.Claim(stockToken, contract, reece, claimAmount)
+	display(stockToken, owStock, reece, contract)
+
+	fmt.Printf("\nAfter claiming:\n")
+	display(stockToken, owStock, reece, contract)
 }
 
 func display(stockToken *StockToken, owStock *OndoWrappedStock, reece string, contract string) {
