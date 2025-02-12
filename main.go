@@ -16,6 +16,7 @@ type StockToken struct {
 	totalSupply      *big.Int
 	balances         map[string]*big.Int
 	rebaseMultiplier *big.Int
+	sharePrice       *big.Int // in cents
 }
 
 // NewStockToken creates a new stock token contract
@@ -25,6 +26,7 @@ func NewStockToken(ticker string) *StockToken {
 		totalSupply:      big.NewInt(0),
 		balances:         make(map[string]*big.Int),
 		rebaseMultiplier: big.NewInt(1),
+		sharePrice:       dollarsToCents("$100.00"), // Initial price
 	}
 }
 
@@ -71,6 +73,11 @@ func (t *StockToken) Rebase(action interface{}) {
 		// ($1.50 / $100.00) = 0.015
 		shareRatio := new(big.Int).Mul(precisionFactor, v.cashAmount)
 		shareRatio.Div(shareRatio, v.sharePrice)
+
+		divAmt, _ := v.cashAmount.Float64()
+		sharePrice, _ := v.sharePrice.Float64()
+		divYield := divAmt / sharePrice
+		fmt.Printf("\nSimulating $%.2f dividend at share price of $%.2f (Yield: %0.2f%%)...\n", divAmt/100, sharePrice/100, divYield*100)
 
 		// Update all balances for cash dividend
 		for address := range t.balances {
@@ -179,6 +186,8 @@ func (ow *OndoWrappedStock) Transfer(from, to string, amount *big.Int) {
 
 // Interact handles token transfers, automatically wrapping if sending to a contract
 func (t *StockToken) Interact(from, to string, amount *big.Int, ows *OndoWrappedStock) {
+	fmt.Printf("Transferring %s%s from %s to %s\n", formatTokens(amount), t.ticker, from, to)
+
 	// Check if recipient is a contract
 	if strings.HasPrefix(to, "0xCONTRACT") {
 		// Auto-wrap and transfer
@@ -234,62 +243,89 @@ func (ow *OndoWrappedStock) Claim(st *StockToken, from, to string, wrappedAmount
 	ow.Unwrap(st, to, wrappedAmount)
 }
 
+// Helper to display balances and values
+func displayBalances(st *StockToken, ow *OndoWrappedStock, userAddr, contractAddr string) {
+	fmt.Printf("\nShare price: $%.2f\n", float64(st.sharePrice.Int64())/100)
+
+	// User's base token balance
+	baseBalance := formatTokens(st.balances[userAddr])
+	baseValue := new(big.Int).Mul(st.balances[userAddr], st.sharePrice)
+	baseValue.Div(baseValue, big.NewInt(basePrecision))
+	fmt.Printf("%s balance: %s tokens ($%.2f)\n",
+		st.ticker,
+		baseBalance,
+		float64(baseValue.Int64())/100)
+
+	// Wrapper contract's base token balance
+	wrapperBalance := formatTokens(st.balances[ow.ticker])
+	wrapperValue := new(big.Int).Mul(st.balances[ow.ticker], st.sharePrice)
+	wrapperValue.Div(wrapperValue, big.NewInt(basePrecision))
+	fmt.Printf("%s balance in wrapper: %s tokens ($%.2f)\n",
+		st.ticker,
+		wrapperBalance,
+		float64(wrapperValue.Int64())/100)
+
+	// Contract's wrapped token balance
+	wrappedBalance := formatTokens(ow.balances[contractAddr])
+	wrappedValue := new(big.Int).Mul(ow.balances[contractAddr], st.sharePrice)
+	wrappedValue.Mul(wrappedValue, ow.exchangeRate)
+	wrappedValue.Div(wrappedValue, big.NewInt(basePrecision*basePrecision))
+	fmt.Printf("%s balance of contract: %s tokens ($%.2f)\n",
+		ow.ticker,
+		wrappedBalance,
+		float64(wrappedValue.Int64())/100)
+
+	fmt.Printf("Exchange rate: %s\n", formatTokens(ow.exchangeRate))
+}
+
 func main() {
-	// Initialize tokens with ticker
+	// Initialize tokens
 	stockToken := NewStockToken("TSLA")
 	owStock := NewOndoWrappedStock("TSLA")
 
-	// Mint tokens to your address
 	reece := "0xREECE"
 	contract := "0xCONTRACT"
 	stockToken.Mint(reece, 10)
 
-	fmt.Printf("Initial %s balance for %s: %s tokens\n",
-		stockToken.ticker, reece, formatTokens(stockToken.balances[reece]))
+	sharePrice := float64(stockToken.sharePrice.Int64()) / 100
+	dollarValueOfBalance := (float64(stockToken.balances[reece].Int64()) / basePrecision) * sharePrice
+	fmt.Printf("Initial %s balance for %s: %s tokens ($%.2f)\n", stockToken.ticker, reece, formatTokens(stockToken.balances[reece]), dollarValueOfBalance)
 
 	// Interact with contract (will auto-wrap)
 	fmt.Println("\nInteracting with contract...")
 	transferAmount := new(big.Int).Mul(big.NewInt(5), big.NewInt(basePrecision))
 	stockToken.Interact(reece, contract, transferAmount, owStock)
 
-	fmt.Printf("\nAfter contract interaction:\n")
-	display(stockToken, owStock, reece, contract)
+	fmt.Println("\nAfter contract interaction:")
+	displayBalances(stockToken, owStock, reece, contract)
 
 	// Simulate a 2:1 stock split
 	fmt.Println("\nSimulating 2:1 stock split...")
+	stockToken.sharePrice.Div(stockToken.sharePrice, big.NewInt(2)) // Halve the price
 	stockToken.Rebase(uint64(2))
 	owStock.UpdateExchangeRate(stockToken)
 
-	fmt.Printf("\nAfter stock split:\n")
-	display(stockToken, owStock, reece, contract)
+	fmt.Println("\nAfter stock split:")
+	displayBalances(stockToken, owStock, reece, contract)
 
 	// Simulate a $1.50 dividend
-	fmt.Println("\nSimulating $1.50 dividend...")
 	dividend := Dividend{
 		cashAmount: dollarsToCents("$1.50"),
-		sharePrice: dollarsToCents("$100.00"),
+		sharePrice: stockToken.sharePrice,
 	}
 	stockToken.Rebase(dividend)
 	owStock.UpdateExchangeRate(stockToken)
 
-	fmt.Printf("\nAfter dividend:\n")
-	display(stockToken, owStock, reece, contract)
+	fmt.Println("\nAfter dividend:")
+	displayBalances(stockToken, owStock, reece, contract)
 
-	// Claim wrapped tokens from contract
+	// Claim wrapped tokens
 	fmt.Println("\nClaiming tokens from contract...")
-	claimAmount := new(big.Int).Mul(big.NewInt(1), big.NewInt(basePrecision)) // Claim 1 wrapped token
+	claimAmount := new(big.Int).Mul(big.NewInt(1), big.NewInt(basePrecision))
 	owStock.Claim(stockToken, contract, reece, claimAmount)
-	display(stockToken, owStock, reece, contract)
 
-	fmt.Printf("\nAfter claiming:\n")
-	display(stockToken, owStock, reece, contract)
-}
-
-func display(stockToken *StockToken, owStock *OndoWrappedStock, reece string, contract string) {
-	fmt.Printf("%s balance: %s\n", stockToken.ticker, formatTokens(stockToken.balances[reece]))
-	fmt.Printf("%s balance in wrapper: %s\n", stockToken.ticker, formatTokens(stockToken.balances[owStock.ticker]))
-	fmt.Printf("%s balance of contract: %s\n", owStock.ticker, formatTokens(owStock.balances[contract]))
-	fmt.Printf("Exchange rate: %s\n", formatTokens(owStock.exchangeRate))
+	fmt.Println("\nAfter claiming:")
+	displayBalances(stockToken, owStock, reece, contract)
 }
 
 // formatTokens converts the raw balance to a human-readable string with 6 decimal places
